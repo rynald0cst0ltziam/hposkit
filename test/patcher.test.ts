@@ -1,6 +1,45 @@
 import { describe, it, expect } from "vitest";
 import { applyPatch, patchAllIssues, computeDiff } from "../src/lib/patcher";
 import type { Issue, ScannedFile } from "../src/lib/scanner";
+import { canAutoPatchIssue } from "../src/lib/scanner";
+
+describe("scanner safety model", () => {
+  it("marks manual-review issues as not auto-patchable", () => {
+    const issue: Issue = {
+      type: "wpdb_get_results",
+      severity: "critical",
+      file: "test.php",
+      line: 2,
+      code: "",
+      title: "test",
+      description: "test",
+      fix: "test",
+      patchable: false,
+      confidence: "high",
+      manualReview: true,
+    };
+
+    expect(canAutoPatchIssue(issue)).toBe(false);
+  });
+
+  it("marks low-confidence patchable issues as not auto-patchable", () => {
+    const issue: Issue = {
+      type: "missing_compat_declaration",
+      severity: "warning",
+      file: "test.php",
+      line: 2,
+      code: "",
+      title: "test",
+      description: "test",
+      fix: "test",
+      patchable: true,
+      confidence: "low",
+      manualReview: false,
+    };
+
+    expect(canAutoPatchIssue(issue)).toBe(false);
+  });
+});
 
 describe("patcher: statement context behavior", () => {
   it("patches standalone statements", () => {
@@ -15,6 +54,8 @@ describe("patcher: statement context behavior", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
     expect(result).toContain("wc_get_order( $order_id )");
@@ -33,9 +74,10 @@ describe("patcher: statement context behavior", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
-    // The inner get_post is followed by "->ID" not a semicolon, so it should NOT be patched
     expect(result).toContain("get_post( $order_id )->ID");
   });
 
@@ -51,9 +93,10 @@ describe("patcher: statement context behavior", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
-    // get_post is followed by " )" then " )", not a semicolon — should not patch
     expect(result).toContain("get_post( $order_id )");
   });
 
@@ -69,11 +112,11 @@ describe("patcher: statement context behavior", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
-    // First occurrence is inside a string — should NOT be patched
     expect(result).toContain('"Call get_post( $order_id ) to fetch order"');
-    // Second occurrence is a standalone statement — SHOULD be patched
     expect(result).toContain("wc_get_order( $order_id );");
   });
 
@@ -89,11 +132,11 @@ describe("patcher: statement context behavior", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
-    // Comment line should NOT be patched
     expect(result).toContain("// Use get_post( $order_id ) to fetch the order");
-    // Standalone statement SHOULD be patched
     expect(result).toContain("wc_get_order( $order_id );");
   });
 });
@@ -111,10 +154,11 @@ describe("patcher: semicolon preservation", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
     expect(result).toContain("wc_get_order( $order_id )->get_meta( '_total', true );");
-    // Should end with semicolon
     expect(result!.trim().endsWith(";")).toBe(true);
   });
 
@@ -130,6 +174,8 @@ describe("patcher: semicolon preservation", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
     expect(result).toContain("$order->save();");
@@ -150,11 +196,12 @@ describe("patcher: header insertion fallbacks", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "medium",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
     expect(result).toContain("declare_compatibility");
     expect(result).toContain("FeaturesUtil");
-    // Declaration should come after the header block
     const headerEnd = result!.indexOf("*/");
     const declStart = result!.indexOf("declare_compatibility");
     expect(declStart).toBeGreaterThan(headerEnd);
@@ -172,6 +219,8 @@ describe("patcher: header insertion fallbacks", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "medium",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
     expect(result).toContain("declare_compatibility");
@@ -190,6 +239,8 @@ describe("patcher: header insertion fallbacks", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "medium",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
     expect(result!.startsWith("<?php")).toBe(true);
@@ -210,9 +261,10 @@ describe("patcher: complex expression handling", () => {
       description: "test",
       fix: "test",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     };
     const result = applyPatch(content, issue);
-    // Now patches with balanced paren parser — value is preserved correctly
     expect(result).toContain("add_meta_data( '_total', calculate_total( $items ) )");
     expect(result).toContain("$order->save();");
   });
@@ -233,6 +285,8 @@ describe("patcher: patchAllIssues integration", () => {
         description: "test",
         fix: "test",
         patchable: true,
+        confidence: "high",
+        manualReview: false,
       },
     ];
     const { results } = patchAllIssues(files, issues);

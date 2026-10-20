@@ -4,6 +4,7 @@
  */
 
 import type { Issue, ScannedFile } from "./scanner";
+import { canAutoPatchIssue } from "./scanner";
 import { isIndexInsideStringOrComment } from "./protection";
 
 export interface PatchResult {
@@ -137,7 +138,7 @@ function splitArguments(argsStr: string): string[] {
 interface FunctionCallMatch {
   fullMatch: string;
   startIndex: number;
-  endIndex: number; // index after the closing )
+  endIndex: number;
   args: string[];
 }
 
@@ -148,23 +149,19 @@ interface FunctionCallMatch {
  */
 function findFunctionCalls(content: string, funcName: string): FunctionCallMatch[] {
   const results: FunctionCallMatch[] = [];
-  // Match function name followed by optional whitespace and opening paren
   const namePattern = new RegExp(`\\b${funcName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\(`, "gi");
   let m: RegExpExecArray | null;
 
   while ((m = namePattern.exec(content)) !== null) {
     const callStart = m.index;
 
-    // Skip if inside string or comment
     if (isIndexInsideStringOrComment(content, callStart)) continue;
 
-    // Find the opening paren position
-    const parenStart = callStart + m[0].length - 1; // position of (
+    const parenStart = callStart + m[0].length - 1;
     const parenEnd = findMatchingParen(content, parenStart);
 
     if (parenEnd === -1) continue;
 
-    // Extract arguments between parens
     const argsStr = content.slice(parenStart + 1, parenEnd);
     const args = splitArguments(argsStr);
 
@@ -212,10 +209,8 @@ function patchMetaFunction(
   let lastIndex = 0;
 
   for (const call of calls) {
-    // Must be in statement context
     if (!isStatementContext(content, call.endIndex)) continue;
 
-    // First argument must be an order variable
     if (call.args.length < 2) continue;
     const varName = isOrderVar(call.args[0]);
     if (!varName) continue;
@@ -225,7 +220,6 @@ function patchMetaFunction(
 
     result += content.slice(lastIndex, call.startIndex);
 
-    // Preserve trailing semicolon
     const afterMatch = content.slice(call.endIndex);
     const semicolonMatch = /^\s*;/.exec(afterMatch);
     let repl = replacement;
@@ -235,7 +229,6 @@ function patchMetaFunction(
 
     result += repl;
     lastIndex = call.endIndex;
-    // Skip past the semicolon if we consumed it
     if (semicolonMatch) {
       lastIndex = call.endIndex + semicolonMatch[0].length;
     }
@@ -254,36 +247,27 @@ function safeReplace(content: string, pattern: RegExp, replacementFn: (...args: 
   let out = "";
   let lastIndex = 0;
   let m: RegExpExecArray | null;
-  // Ensure global flag
   const re = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
   while ((m = re.exec(content)) !== null) {
     const idx = m.index;
     const matchText = m[0];
 
-    // If the start is inside a string or comment, skip this match
     if (isIndexInsideStringOrComment(content, idx)) {
       continue;
     }
 
-    // Determine whether this match is used as a standalone statement.
-    // We consider it a statement if, immediately after the match, we have:
-    //  - a semicolon ; OR
-    //  - only whitespace then a semicolon or end-of-line/comment
     const afterIndex = idx + matchText.length;
     const restSlice = content.slice(afterIndex);
     const isStatement =
-      /^\s*;/.test(restSlice) || // semicolon after optional whitespace
-      /^\s*(\/\/|\/\*|\#|\r|\n|$)/.test(restSlice); // followed by comment/newline or EOF
+      /^\s*;/.test(restSlice) ||
+      /^\s*(\/\/|\/\*|\#|\r|\n|$)/.test(restSlice);
 
-    // If this is not a statement context, skip auto-patch to avoid injecting
-    // multiple statements into an expression or argument list.
     if (!isStatement) {
       continue;
     }
 
     out += content.slice(lastIndex, idx);
     let repl = replacementFn(...m, idx, content);
-    // Preserve trailing semicolon from original match if present
     if (/;\s*$/.test(matchText) && !/;\s*$/.test(repl)) {
       repl = repl + ";";
     }
@@ -323,7 +307,6 @@ export function applyPatch(content: string, issue: Issue): string | null {
 }
 
 function patchGetPost(content: string): string {
-  // Replace get_post( $id ) with wc_get_order( $id ) only when in code context.
   const pattern = /get_post\s*\(\s*\$(order_id|order|post_id|postid|id)\b[^)]*\)/gi;
   return safeReplace(content, pattern, (_match: string, variable: string) => {
     return `wc_get_order( $${variable} )`;
@@ -332,7 +315,6 @@ function patchGetPost(content: string): string {
 
 function patchGetPostMeta(content: string): string {
   return patchMetaFunction(content, "get_post_meta", (variable, args) => {
-    // get_post_meta( $order_id, $key, $single )
     if (args.length < 2) return null;
     const key = args[1].trim();
     const single = args[2] ? args[2].trim() : "";
@@ -343,7 +325,6 @@ function patchGetPostMeta(content: string): string {
 
 function patchAddPostMeta(content: string): string {
   return patchMetaFunction(content, "add_post_meta", (variable, args) => {
-    // add_post_meta( $order_id, $key, $value, $unique )
     if (args.length < 3) return null;
     const key = args[1].trim();
     const value = args[2].trim();
@@ -353,7 +334,6 @@ function patchAddPostMeta(content: string): string {
 
 function patchUpdatePostMeta(content: string): string {
   return patchMetaFunction(content, "update_post_meta", (variable, args) => {
-    // update_post_meta( $order_id, $key, $value, $prev_value )
     if (args.length < 3) return null;
     const key = args[1].trim();
     const value = args[2].trim();
@@ -363,7 +343,6 @@ function patchUpdatePostMeta(content: string): string {
 
 function patchDeletePostMeta(content: string): string {
   return patchMetaFunction(content, "delete_post_meta", (variable, args) => {
-    // delete_post_meta( $order_id, $key, $value )
     if (args.length < 2) return null;
     const key = args[1].trim();
     return `$order = wc_get_order( $${variable} ); $order->delete_meta_data( ${key} ); $order->save();`;
@@ -387,10 +366,8 @@ function patchGetPostsOrders(content: string): string {
 }
 
 function patchMissingDeclaration(content: string): string {
-  // Insert a valid declare_compatibility snippet.
-  const declaration = `\n\n// Declare HPOS compatibility.\nadd_action( 'before_woocommerce_init', function() {\n    if ( class_exists( '\\Automattic\\WooCommerce\\Utilities\\FeaturesUtil' ) ) {\n        \\Automattic\\WooCommerce\\Utilities\\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__ );\n    }\n});\n\n`;
+  const declaration = `\n\n// Declare HPOS compatibility.\nadd_action( 'before_woocommerce_init', function() {\n    if ( class_exists( '\\Automattic\\WooCommerce\\Utilities\\FeaturesUtil' ) ) {\n        \\Automattic\\WooCommerce\\Utilities\\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );\n    }\n} );`;
 
-  // Prefer to insert directly after the plugin header block if present (search top of file).
   const topSegment = content.slice(0, 2000);
   const headerRegex = /\/\*\s*[\s\S]*?Plugin Name:\s*[\s\S]*?\*\/\s*/im;
   const headerMatch = headerRegex.exec(topSegment);
@@ -399,13 +376,11 @@ function patchMissingDeclaration(content: string): string {
     return content.substring(0, headerEnd) + declaration + content.substring(headerEnd);
   }
 
-  // If file starts with <?php, insert after it.
   const phpOpen = /^\s*<\?php[ \t]*\r?\n?/i;
   if (phpOpen.test(content)) {
     return content.replace(phpOpen, (m) => m + declaration);
   }
 
-  // Last resort: prepend a <?php wrapper with the declaration to keep the file valid.
   return "<?php\n" + declaration + "\n" + content;
 }
 
@@ -423,7 +398,6 @@ function patchMissingHeader(content: string, issue: Issue): string {
 
   if (insertions.length === 0) return content;
 
-  // Attempt to find the plugin header block and insert before its closing */ (only search top of file)
   const topSegment = content.slice(0, 2000);
   const pluginHeaderMatch = /\/\*\s*[\s\S]*?Plugin Name:\s*[\s\S]*?\*\//im.exec(topSegment);
   if (pluginHeaderMatch && pluginHeaderMatch.index !== undefined) {
@@ -438,7 +412,6 @@ function patchMissingHeader(content: string, issue: Issue): string {
     }
   }
 
-  // Fallback: add header at top
   const headerBlock = `/*\n${insertions.join("\n")}\n*/\n`;
   return headerBlock + content;
 }
@@ -473,10 +446,9 @@ export function patchAllIssues(
   files: ScannedFile[],
   issues: Issue[]
 ): { patchedFiles: ScannedFile[]; results: PatchResult[] } {
-  // Group issues by file.
   const issuesByFile = new Map<string, Issue[]>();
   for (const issue of issues) {
-    if (!issue.patchable) continue;
+    if (!canAutoPatchIssue(issue)) continue;
     const existing = issuesByFile.get(issue.file) || [];
     existing.push(issue);
     issuesByFile.set(issue.file, existing);
@@ -510,7 +482,6 @@ export function patchAllIssues(
           });
           patchedFiles.push({ path: file.path, content });
         } else {
-          // No changes but file had patchable issues that couldn't be auto-applied
           results.push({
             file: file.path,
             originalContent: original,

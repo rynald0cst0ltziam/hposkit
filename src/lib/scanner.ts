@@ -4,6 +4,7 @@
  */
 
 export type Severity = "critical" | "warning" | "info";
+export type IssueConfidence = "high" | "medium" | "low";
 
 export type IssueType =
   | "get_post"
@@ -29,6 +30,8 @@ export interface Issue {
   description: string;
   fix: string;
   patchable: boolean;
+  confidence?: IssueConfidence;
+  manualReview?: boolean;
 }
 
 export interface PluginScanResult {
@@ -143,6 +146,8 @@ function findGetPost(content: string, lines: string[], file: string): Issue[] {
         "Uses get_post() to fetch an order as a WP_Post object. Under HPOS, orders are not stored in wp_posts. Use wc_get_order( $order_id ) to get a WC_Order object instead.",
       fix: "wc_get_order( $order_id )",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
   return issues;
@@ -165,6 +170,8 @@ function findGetPostMeta(content: string, lines: string[], file: string): Issue[
         "Uses get_post_meta() to read order metadata. Under HPOS, order data is stored in custom tables, not wp_postmeta. Use wc_get_order( $order_id )->get_meta( 'key' ) instead.",
       fix: "wc_get_order( $order_id )->get_meta( 'key' )",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
   return issues;
@@ -187,6 +194,8 @@ function findAddPostMeta(content: string, lines: string[], file: string): Issue[
         "Uses add_post_meta() to add order metadata. Under HPOS, this writes to wp_postmeta which is not synced to the orders table. Use $order = wc_get_order( $order_id ); $order->add_meta_data( 'key', $value ); $order->save(); instead.",
       fix: "$order->add_meta_data( 'key', $value ); $order->save();",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
   return issues;
@@ -209,6 +218,8 @@ function findUpdatePostMeta(content: string, lines: string[], file: string): Iss
         "Uses update_post_meta() to write order metadata. Under HPOS, this writes to wp_postmeta which is not synced to the orders table. Use $order = wc_get_order( $order_id ); $order->update_meta_data( 'key', $value ); $order->save(); instead.",
       fix: "$order->update_meta_data( 'key', $value ); $order->save();",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
   return issues;
@@ -231,6 +242,8 @@ function findDeletePostMeta(content: string, lines: string[], file: string): Iss
         "Uses delete_post_meta() to remove order metadata. Under HPOS, this does not affect the orders table. Use $order->delete_meta_data( 'key' ); $order->save(); instead.",
       fix: "$order->delete_meta_data( 'key' ); $order->save();",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
   return issues;
@@ -253,6 +266,8 @@ function findWpQueryOrders(content: string, lines: string[], file: string): Issu
         "Uses WP_Query with post_type=shop_order to fetch orders. Under HPOS, orders are not stored as posts. Use wc_get_orders( [ ... ] ) instead.",
       fix: "wc_get_orders( [ 'limit' => -1 ] )",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
   return issues;
@@ -275,6 +290,8 @@ function findGetPostsOrders(content: string, lines: string[], file: string): Iss
         "Uses get_posts() with post_type=shop_order. Under HPOS, orders are not stored as posts. Use wc_get_orders() instead.",
       fix: "wc_get_orders( [ 'limit' => -1 ] )",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
   return issues;
@@ -283,8 +300,7 @@ function findGetPostsOrders(content: string, lines: string[], file: string): Iss
 function findWpdbQueries(content: string, lines: string[], file: string): Issue[] {
   const issues: Issue[] = [];
 
-  // $wpdb->get_results with shop_order — manual fix only, can't safely auto-convert SQL
-  const pattern1 = /\$wpdb->get_results\s*\([\s\S]*?(?:shop_order|post_type\s*=\s*['"]shop_order)/gi;
+  const pattern1 = /\$wpdb->get_results\s*\([\s\S]*?(?:shop_order|post_type\s*=\s*["']shop_order)/gi;
   let match: RegExpExecArray | null;
   while ((match = pattern1.exec(content)) !== null) {
     const line = lineFromOffset(content, match.index);
@@ -296,13 +312,14 @@ function findWpdbQueries(content: string, lines: string[], file: string): Issue[
       code: (lines[line - 1] || "").trim(),
       title: "Direct $wpdb query for orders",
       description:
-        "Uses $wpdb->get_results() with a query targeting shop_order posts. Under HPOS, this query returns no results because orders live in custom tables. Must be rewritten manually to use wc_get_orders() or the Order CRUD API.",
+        "Uses $wpdb->get_results() with a query targeting shop_order posts. Under HPOS, this query returns no results because orders live in custom tables. Must be rewritten manually to use wc_get_orders() or wc_get_order( $order_id ).",
       fix: "Rewrite to use wc_get_orders() or wc_get_order( $order_id )",
       patchable: false,
+      confidence: "high",
+      manualReview: true,
     });
   }
 
-  // $wpdb->insert into $wpdb->posts
   const pattern2 = /\$wpdb->insert\s*\(\s*\$wpdb->posts\b/gi;
   while ((match = pattern2.exec(content)) !== null) {
     const line = lineFromOffset(content, match.index);
@@ -317,10 +334,11 @@ function findWpdbQueries(content: string, lines: string[], file: string): Issue[
         "Inserts directly into wp_posts table. If creating orders, use wc_create_order() instead. Direct inserts bypass HPOS data integrity.",
       fix: "wc_create_order()",
       patchable: false,
+      confidence: "high",
+      manualReview: true,
     });
   }
 
-  // $wpdb->update or $wpdb->delete on wp_posts with shop_order
   const pattern3 = /\$wpdb->(update|delete)\s*\(\s*\$wpdb->posts\b[\s\S]*?shop_order/gi;
   while ((match = pattern3.exec(content)) !== null) {
     const line = lineFromOffset(content, match.index);
@@ -336,6 +354,8 @@ function findWpdbQueries(content: string, lines: string[], file: string): Issue[
         `Uses $wpdb->${op}() on wp_posts targeting shop_order. Under HPOS, orders are in custom tables. Use WC_Order CRUD methods instead.`,
       fix: `Use \$order = wc_get_order( \$order_id ); \$order->save(); or \$order->delete();`,
       patchable: false,
+      confidence: "high",
+      manualReview: true,
     });
   }
 
@@ -361,9 +381,11 @@ function findDeprecatedHooks(content: string, lines: string[], file: string): Is
         code: (lines[line - 1] || "").trim(),
         title: `Deprecated hook: ${hook}`,
         description:
-          "This hook historically passes $order_id (an integer). Under HPOS, prefer hooks that pass the WC_Order object directly. Verify your callback signature and use wc_get_order() to obtain the order object if needed.",
+          "This hook historically passes $order_id (an integer). Under HPOS, prefer hooks that pass the WC_Order object directly. Verify your callback signature and use wc_get_order() to obtain the order object when needed.",
         fix: "Use wc_get_order( $order_id ) to get the order object in your callback.",
         patchable: false,
+        confidence: "medium",
+        manualReview: true,
       });
     }
   }
@@ -391,6 +413,8 @@ export function scanPluginHeader(mainFileContent: string, allFiles: ScannedFile[
         'Plugin header should declare "WC tested up to: 9.4" to indicate HPOS compatibility testing.',
       fix: "Add: * WC tested up to: 9.4",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
 
@@ -406,12 +430,13 @@ export function scanPluginHeader(mainFileContent: string, allFiles: ScannedFile[
         'Plugin header should declare "Requires Plugins: woocommerce" for proper dependency management.',
       fix: "Add: * Requires Plugins: woocommerce",
       patchable: true,
+      confidence: "high",
+      manualReview: false,
     });
   }
 
-  // Check all files for declare_compatibility call.
   const hasDecl = allFiles.some((f) =>
-    /declare_compatibility\s*\(\s*['"]custom_order_tables['"]/i.test(f.content)
+    /declare_compatibility\s*\(\s*["']custom_order_tables["']/i.test(f.content)
   );
   if (!hasDecl) {
     issues.push({
@@ -422,14 +447,23 @@ export function scanPluginHeader(mainFileContent: string, allFiles: ScannedFile[
       code: "",
       title: "Missing HPOS compatibility declaration",
       description:
-        "Plugin does not call FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__ ). Without this, WooCommerce cannot confirm HPOS compatibility and may show warnings or disable the plugin.",
+        "Plugin does not call FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__ ). Without this, WooCommerce cannot confirm HPOS compatibility and may show warnings or disable compatibility support.",
       fix:
-        "add_action( 'before_woocommerce_init', function() {\n    if ( class_exists( '\\Automattic\\WooCommerce\\Utilities\\FeaturesUtil' ) ) {\n        \\Automattic\\WooCommerce\\Utilities\\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__ );\n    }\n} );",
+        "add_action( 'before_woocommerce_init', function() {\n    if ( class_exists( '\\Automattic\\WooCommerce\\Utilities\\FeaturesUtil' ) ) {\n        \\Automattic\\WooCommerce\\Utilities\\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );\n    }\n} );",
       patchable: true,
+      confidence: "medium",
+      manualReview: false,
     });
   }
 
   return issues;
+}
+
+export function canAutoPatchIssue(issue: Issue): boolean {
+  if (!issue.patchable) return false;
+  if (issue.manualReview) return false;
+  const confidence = issue.confidence ?? "high";
+  return confidence !== "low";
 }
 
 /**
